@@ -18,8 +18,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.Resource;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import jakarta.annotation.Resource;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
@@ -58,18 +59,27 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
 
-    private static final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
+    private final ExecutorService seckillOrderExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "seckill-order-handler");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     @PostConstruct
     private void init() {
-        SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
+        seckillOrderExecutor.submit(new VoucherOrderHandler());
+    }
+
+    @PreDestroy
+    private void destroy() {
+        seckillOrderExecutor.shutdownNow();
     }
 
     private class VoucherOrderHandler implements Runnable {
 
         @Override
         public void run() {
-            while (true) {
+            while (!Thread.currentThread().isInterrupted()) {
                 try {
                     // 1.获取消息队列中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS s1 >
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
@@ -91,6 +101,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     // 4.确认消息 XACK
                     stringRedisTemplate.opsForStream().acknowledge("s1", "g1", record.getId());
                 } catch (Exception e) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        break;
+                    }
                     log.error("处理订单异常", e);
                     handlePendingList();
                 }
@@ -98,7 +111,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
 
         private void handlePendingList() {
-            while (true) {
+            while (!Thread.currentThread().isInterrupted()) {
                 try {
                     // 1.获取pending-list中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS s1 0
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
@@ -120,6 +133,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     // 4.确认消息 XACK
                     stringRedisTemplate.opsForStream().acknowledge("s1", "g1", record.getId());
                 } catch (Exception e) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        break;
+                    }
                     log.error("处理订单异常", e);
                 }
             }
@@ -160,7 +176,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         try {
             // 5.1.查询订单
-            int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
+            long count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
             // 5.2.判断是否存在
             if (count > 0) {
                 // 用户已经购买过了
@@ -279,7 +295,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         try {
             // 5.1.查询订单
-            int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
+            long count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
             // 5.2.判断是否存在
             if (count > 0) {
                 // 用户已经购买过了
@@ -332,7 +348,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         try {
             // 5.1.查询订单
-            int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
+            long count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
             // 5.2.判断是否存在
             if (count > 0) {
                 // 用户已经购买过了
@@ -376,7 +392,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         synchronized (userId.toString().intern()) {
             // 5.1.查询订单
-            int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
+            long count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
             // 5.2.判断是否存在
             if (count > 0) {
                 // 用户已经购买过了

@@ -4,13 +4,14 @@ import com.hmdp.entity.Shop;
 import com.hmdp.service.impl.ShopServiceImpl;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisIdWorker;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.geo.Point;
 import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
-import javax.annotation.Resource;
+import jakarta.annotation.Resource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -38,7 +39,7 @@ class HmDianPingApplicationTests {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    private ExecutorService es = Executors.newFixedThreadPool(500);
+    private static final ExecutorService ES = Executors.newFixedThreadPool(50);
 
     @Test
     void testIdWorker() throws InterruptedException {
@@ -47,13 +48,12 @@ class HmDianPingApplicationTests {
         Runnable task = () -> {
             for (int i = 0; i < 100; i++) {
                 long id = redisIdWorker.nextId("order");
-                System.out.println("id = " + id);
             }
             latch.countDown();
         };
         long begin = System.currentTimeMillis();
         for (int i = 0; i < 300; i++) {
-            es.submit(task);
+            ES.submit(task);
         }
         latch.await();
         long end = System.currentTimeMillis();
@@ -61,9 +61,19 @@ class HmDianPingApplicationTests {
     }
 
     @Test
-    void testSaveShop() throws InterruptedException {
+    void testSaveShop() {
         Shop shop = shopService.getById(1L);
-        cacheClient.setWithLogicalExpire(CACHE_SHOP_KEY + 1L, shop, 10L, TimeUnit.SECONDS);
+        String logicalCacheKey = CACHE_SHOP_KEY + "logical:" + 1L;
+        try {
+            cacheClient.setWithLogicalExpire(logicalCacheKey, shop, 10L, TimeUnit.SECONDS);
+        } finally {
+            stringRedisTemplate.delete(logicalCacheKey);
+        }
+    }
+
+    @AfterAll
+    static void shutdownExecutor() {
+        ES.shutdownNow();
     }
 
     @Test

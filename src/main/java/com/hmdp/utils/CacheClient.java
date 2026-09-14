@@ -4,6 +4,7 @@ import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -23,10 +24,19 @@ public class CacheClient {
 
     private final StringRedisTemplate stringRedisTemplate;
 
-    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+    private final ExecutorService cacheRebuildExecutor = Executors.newFixedThreadPool(10, runnable -> {
+        Thread thread = new Thread(runnable, "cache-rebuild");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public CacheClient(StringRedisTemplate stringRedisTemplate) {
         this.stringRedisTemplate = stringRedisTemplate;
+    }
+
+    @PreDestroy
+    public void shutdownExecutor() {
+        cacheRebuildExecutor.shutdownNow();
     }
 
     public void set(String key, Object value, Long time, TimeUnit unit) {
@@ -34,6 +44,10 @@ public class CacheClient {
     }
 
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
+        if (value == null) {
+            stringRedisTemplate.delete(key);
+            return;
+        }
         // 设置逻辑过期
         RedisData redisData = new RedisData();
         redisData.setData(value);
@@ -84,6 +98,10 @@ public class CacheClient {
         }
         // 4.命中，需要先把json反序列化为对象
         RedisData redisData = JSONUtil.toBean(json, RedisData.class);
+        if (redisData.getData() == null) {
+            stringRedisTemplate.delete(key);
+            return null;
+        }
         R r = JSONUtil.toBean((JSONObject) redisData.getData(), type);
         LocalDateTime expireTime = redisData.getExpireTime();
         // 5.判断是否过期
@@ -99,7 +117,7 @@ public class CacheClient {
         // 6.2.判断是否获取锁成功
         if (isLock){
             // 6.3.成功，开启独立线程，实现缓存重建
-            CACHE_REBUILD_EXECUTOR.submit(() -> {
+            cacheRebuildExecutor.submit(() -> {
                 try {
                     // 查询数据库
                     R newR = dbFallback.apply(id);
