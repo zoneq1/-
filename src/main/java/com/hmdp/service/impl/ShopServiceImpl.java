@@ -15,9 +15,13 @@ import org.springframework.data.geo.GeoResults;
 import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.domain.geo.GeoReference;
+import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RBloomFilter;
+import org.redisson.api.RedissonClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.Resource;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +36,7 @@ import static com.hmdp.utils.RedisConstants.*;
  * @author 虎哥
  * @since 2021-12-22
  */
+@Slf4j
 @Service
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
 
@@ -42,8 +47,30 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     private CacheClient cacheClient;
 
+    @Resource
+    private RedissonClient redissonClient;
+
+    private RBloomFilter<Long> shopBloomFilter;
+
+    /**
+     * 启动时把全部店铺id灌入布隆过滤器。
+     * 注意：布隆过滤器只能新增不能删除单个元素，后续新增店铺需在写库后同步 add，否则会漏判。
+     */
+    @PostConstruct
+    public void initShopBloomFilter() {
+        shopBloomFilter = redissonClient.getBloomFilter(BLOOM_SHOP_KEY);
+        shopBloomFilter.tryInit(BLOOM_SHOP_EXPECTED_INSERTIONS, BLOOM_SHOP_FALSE_PROBABILITY);
+        List<Long> shopIds = query().select("id").list().stream().map(Shop::getId).toList();
+        shopIds.forEach(shopBloomFilter::add);
+        log.info("商铺布隆过滤器预热完成，共 {} 个店铺", shopIds.size());
+    }
+
     @Override
     public Result queryById(Long id) {
+        // 布隆过滤器前置拦截：id一定不存在时直接返回，请求不会落到缓存和数据库
+        if (!shopBloomFilter.contains(id)) {
+            return Result.fail("店铺不存在！");
+        }
         // 解决缓存穿透
         Shop shop = cacheClient
                 .queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);

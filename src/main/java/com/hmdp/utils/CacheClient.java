@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
@@ -40,7 +41,20 @@ public class CacheClient {
     }
 
     public void set(String key, Object value, Long time, TimeUnit unit) {
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), randomTtl(time, unit), TimeUnit.SECONDS);
+    }
+
+    /**
+     * 在基础TTL上叠加 ±10% 的随机抖动。
+     * 固定过期时间会让同一批写入的key在同一时刻集中失效，请求同时打到数据库形成缓存雪崩。
+     */
+    private long randomTtl(Long time, TimeUnit unit) {
+        long base = unit.toSeconds(time);
+        long jitter = base / 10;
+        if (jitter == 0) {
+            return base;
+        }
+        return base - jitter + ThreadLocalRandom.current().nextLong(2 * jitter + 1);
     }
 
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
@@ -76,8 +90,8 @@ public class CacheClient {
         R r = dbFallback.apply(id);
         // 5.不存在，返回错误
         if (r == null) {
-            // 将空值写入redis
-            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+            // 将空值写入redis（同样叠加随机抖动，避免空值集中过期后再次穿透到数据库）
+            stringRedisTemplate.opsForValue().set(key, "", randomTtl(CACHE_NULL_TTL, TimeUnit.MINUTES), TimeUnit.SECONDS);
             // 返回错误信息
             return null;
         }
@@ -167,8 +181,8 @@ public class CacheClient {
             r = dbFallback.apply(id);
             // 5.不存在，返回错误
             if (r == null) {
-                // 将空值写入redis
-                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                // 将空值写入redis（同样叠加随机抖动，避免空值集中过期后再次穿透到数据库）
+                stringRedisTemplate.opsForValue().set(key, "", randomTtl(CACHE_NULL_TTL, TimeUnit.MINUTES), TimeUnit.SECONDS);
                 // 返回错误信息
                 return null;
             }

@@ -15,8 +15,26 @@ public class RedisConstants {
     public static final Long LOCK_SHOP_TTL = 10L;
 
     public static final String SECKILL_STOCK_KEY = "seckill:stock:";
+    public static final String SECKILL_ORDER_KEY = "seckill:order:";
     public static final String BLOG_LIKED_KEY = "blog:liked:";
     public static final String FEED_KEY = "feed:";
     public static final String SHOP_GEO_KEY = "shop:geo:";
     public static final String USER_SIGN_KEY = "sign:";
+
+    /**
+     * 商铺布隆过滤器：预计插入的元素个数
+     */
+    public static final Long BLOOM_SHOP_EXPECTED_INSERTIONS = 10000L;
+    /**
+     * 商铺布隆过滤器：可接受的误判率
+     */
+    public static final Double BLOOM_SHOP_FALSE_PROBABILITY = 0.01;
+    public static final String BLOOM_SHOP_KEY = "bloom:shop";
+
+    /**
+     * 秒杀订单消息队列
+     */
+    public static final String SECKILL_ORDER_STREAM_KEY = "stream.orders";
+    public static final String SECKILL_ORDER_GROUP = "g1";
+    public static final String SECKILL_ORDER_CONSUMER = "c1";
 }

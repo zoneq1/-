@@ -14,6 +14,7 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.stream.*;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
@@ -21,12 +22,15 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.annotation.Resource;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import static com.hmdp.utils.RedisConstants.*;
 
 /**
  * <p>
@@ -67,7 +71,47 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @PostConstruct
     private void init() {
+        createConsumerGroupIfAbsent();
         seckillOrderExecutor.submit(new VoucherOrderHandler());
+    }
+
+    /**
+     * 消费者组必须先于 XREADGROUP 创建，否则读取时 Redis 直接返回 NOGROUP。
+     * mkStream=true 保证冷启动、流尚不存在时也能建组成功。
+     */
+    private void createConsumerGroupIfAbsent() {
+        try {
+            stringRedisTemplate.execute((RedisCallback<Object>) connection -> {
+                connection.streamCommands().xGroupCreate(
+                        SECKILL_ORDER_STREAM_KEY.getBytes(StandardCharsets.UTF_8),
+                        SECKILL_ORDER_GROUP,
+                        ReadOffset.from("0"),
+                        true);
+                return null;
+            });
+            log.info("已创建秒杀订单消费者组 {}", SECKILL_ORDER_GROUP);
+        } catch (Exception e) {
+            if (isConsumerGroupExists(e)) {
+                // 组已存在，重复启动属于正常情况
+                log.info("秒杀订单消费者组 {} 已存在，跳过创建", SECKILL_ORDER_GROUP);
+            } else {
+                log.error("创建秒杀订单消费者组失败，秒杀下单将不可用", e);
+            }
+        }
+    }
+
+    /**
+     * Spring 把 BUSYGROUP 包装成 RedisSystemException("Error in execution")，
+     * 真正的信息在 cause 链深处的 RedisBusyException 里，必须逐层查找。
+     */
+    private boolean isConsumerGroupExists(Throwable e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            String message = cause.getMessage();
+            if (message != null && message.contains("BUSYGROUP")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @PreDestroy
@@ -81,11 +125,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         public void run() {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    // 1.获取消息队列中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS s1 >
+                    // 1.获取消息队列中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS stream.orders >
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
-                            Consumer.from("g1", "c1"),
+                            Consumer.from(SECKILL_ORDER_GROUP, SECKILL_ORDER_CONSUMER),
                             StreamReadOptions.empty().count(1).block(Duration.ofSeconds(2)),
-                            StreamOffset.create("stream.orders", ReadOffset.lastConsumed())
+                            StreamOffset.create(SECKILL_ORDER_STREAM_KEY, ReadOffset.lastConsumed())
                     );
                     // 2.判断订单信息是否为空
                     if (list == null || list.isEmpty()) {
@@ -99,7 +143,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     // 3.创建订单
                     createVoucherOrder(voucherOrder);
                     // 4.确认消息 XACK
-                    stringRedisTemplate.opsForStream().acknowledge("s1", "g1", record.getId());
+                    stringRedisTemplate.opsForStream().acknowledge(SECKILL_ORDER_STREAM_KEY, SECKILL_ORDER_GROUP, record.getId());
                 } catch (Exception e) {
                     if (Thread.currentThread().isInterrupted()) {
                         break;
@@ -113,11 +157,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         private void handlePendingList() {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    // 1.获取pending-list中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS s1 0
+                    // 1.获取pending-list中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS stream.orders 0
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
-                            Consumer.from("g1", "c1"),
+                            Consumer.from(SECKILL_ORDER_GROUP, SECKILL_ORDER_CONSUMER),
                             StreamReadOptions.empty().count(1),
-                            StreamOffset.create("stream.orders", ReadOffset.from("0"))
+                            StreamOffset.create(SECKILL_ORDER_STREAM_KEY, ReadOffset.from("0"))
                     );
                     // 2.判断订单信息是否为空
                     if (list == null || list.isEmpty()) {
@@ -131,7 +175,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     // 3.创建订单
                     createVoucherOrder(voucherOrder);
                     // 4.确认消息 XACK
-                    stringRedisTemplate.opsForStream().acknowledge("s1", "g1", record.getId());
+                    stringRedisTemplate.opsForStream().acknowledge(SECKILL_ORDER_STREAM_KEY, SECKILL_ORDER_GROUP, record.getId());
                 } catch (Exception e) {
                     if (Thread.currentThread().isInterrupted()) {
                         break;
